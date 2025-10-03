@@ -15,7 +15,7 @@ Parquet file is malformed
 statement error
 SELECT * FROM 'test/sql/copy/parquet/broken/schemamismatch.parquet';
 ----
-schema references column index
+schema declares
 
 statement error
 SELECT * FROM 'test/sql/copy/parquet/broken/schemamismatch.parquet';
