@@ -257,7 +257,6 @@ public:
 				break;
 			case duckdb_parquet::Encoding::RLE_DICTIONARY:
 				if (state.dictionary.GetSize() == 0) {
-					// There are no non-null values to encode, so no dictionary page can be written.
 					state.encoding = duckdb_parquet::Encoding::PLAIN;
 					state.dictionary.Reset();
 					return;
