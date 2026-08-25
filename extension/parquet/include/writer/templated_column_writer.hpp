@@ -68,15 +68,23 @@ static void TemplatedWritePlain(Vector &col, ColumnWriterStatistics *stats, cons
 template <class SRC, class TGT, class OP>
 class StandardColumnWriterState : public PrimitiveColumnWriterState {
 public:
+	static idx_t GetDictionarySizeLimit(ParquetWriter &writer, const duckdb_parquet::RowGroup &row_group,
+	                                    optional<duckdb_parquet::Encoding::type> requested_encoding) {
+		const auto row_count = NumericCast<idx_t>(row_group.num_rows);
+		if (requested_encoding == duckdb_parquet::Encoding::RLE_DICTIONARY) {
+			return MinValue<idx_t>(row_count, PrimitiveDictionary<SRC, TGT, OP>::MAXIMUM_POSSIBLE_SIZE);
+		}
+		if (writer.DictionarySizeLimit().IsValid()) {
+			return writer.DictionarySizeLimit().GetIndex();
+		}
+		return row_count / 5;
+	}
+
 	StandardColumnWriterState(ParquetWriter &writer, duckdb_parquet::RowGroup &row_group, idx_t col_idx,
 	                          optional<duckdb_parquet::Encoding::type> requested_encoding_p)
 	    : PrimitiveColumnWriterState(writer, row_group, col_idx),
 	      dictionary(BufferAllocator::Get(writer.GetContext()),
-	                 requested_encoding_p == duckdb_parquet::Encoding::RLE_DICTIONARY
-	                     ? MinValue<idx_t>(NumericCast<idx_t>(row_group.num_rows),
-	                                       PrimitiveDictionary<SRC, TGT, OP>::MAXIMUM_POSSIBLE_SIZE)
-	                 : writer.DictionarySizeLimit().IsValid() ? writer.DictionarySizeLimit().GetIndex()
-	                                                          : NumericCast<idx_t>(row_group.num_rows) / 5,
+	                 GetDictionarySizeLimit(writer, row_group, requested_encoding_p),
 	                 writer.StringDictionaryPageSizeLimit()),
 	      requested_encoding(requested_encoding_p), encoding(duckdb_parquet::Encoding::PLAIN) {
 	}
