@@ -17,6 +17,7 @@
 
 #include "duckdb.hpp"
 #include "duckdb/common/common.hpp"
+#include "duckdb/common/optional.hpp"
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/encryption_state.hpp"
 #include "duckdb/common/exception.hpp"
@@ -91,15 +92,6 @@ struct ParquetBloomFilterEntry {
 enum class ParquetVersion : uint8_t {
 	V1 = 1, //! Excludes DELTA_BINARY_PACKED, DELTA_LENGTH_BYTE_ARRAY, BYTE_STREAM_SPLIT
 	V2 = 2, //! Includes the encodings above
-};
-
-enum class ParquetColumnEncoding : uint8_t {
-	AUTO = 0,
-	PLAIN = 1,
-	RLE_DICTIONARY = 2,
-	DELTA_BINARY_PACKED = 3,
-	DELTA_LENGTH_BYTE_ARRAY = 4,
-	BYTE_STREAM_SPLIT = 5,
 };
 
 enum class TimeStampIsAdjustedToUTC : uint8_t {
@@ -186,8 +178,8 @@ struct ParquetWriterOptions {
 	int64_t compression_level;
 	//! Parquet version to use, higher versions enable more advanced compression modes
 	ParquetVersion parquet_version;
-	//! Requested encoding for each top-level column, or AUTO to use the writer's default selection
-	vector<ParquetColumnEncoding> column_encodings;
+	//! Requested encoding for each top-level column, or nullopt to use the writer's default selection
+	vector<optional<duckdb_parquet::Encoding::type>> column_encodings;
 	//! GEO Parquet version to use
 	GeoParquetVersion geoparquet_version;
 	//! Whether timestamp columns should be written as the INT96 type in the parquet file
@@ -262,7 +254,7 @@ public:
 	ParquetVersion GetParquetVersion() const {
 		return options.parquet_version;
 	}
-	ParquetColumnEncoding GetColumnEncoding(const Identifier &column_name) const;
+	optional<duckdb_parquet::Encoding::type> GetColumnEncoding(const Identifier &column_name) const;
 	GeoParquetVersion GetGeoParquetVersion() const {
 		return options.geoparquet_version;
 	}

@@ -583,9 +583,9 @@ void ParquetWriter::InitializeColumnWriters() {
 ParquetWriter::~ParquetWriter() {
 }
 
-ParquetColumnEncoding ParquetWriter::GetColumnEncoding(const Identifier &column_name) const {
+optional<duckdb_parquet::Encoding::type> ParquetWriter::GetColumnEncoding(const Identifier &column_name) const {
 	if (options.column_encodings.empty()) {
-		return ParquetColumnEncoding::AUTO;
+		return nullopt;
 	}
 	D_ASSERT(options.column_encodings.size() == options.column_names.size());
 	for (idx_t column_idx = 0; column_idx < options.column_names.size(); column_idx++) {
@@ -593,7 +593,7 @@ ParquetColumnEncoding ParquetWriter::GetColumnEncoding(const Identifier &column_
 			return options.column_encodings[column_idx];
 		}
 	}
-	return ParquetColumnEncoding::AUTO;
+	return nullopt;
 }
 
 void ParquetWriter::AnalyzeSchema(ColumnDataCollection &buffer, vector<unique_ptr<ColumnWriter>> &column_writers) {

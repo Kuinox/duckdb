@@ -81,6 +81,14 @@ COPY encoding_data TO '{TEST_DIR}/invalid_encoding_type.parquet' (
 Binder Error
 
 statement error
+COPY encoding_data TO '{TEST_DIR}/unsupported_encoding.parquet' (
+    FORMAT PARQUET,
+    ENCODING {id: 'BIT_PACKED'}
+);
+----
+Binder Error
+
+statement error
 COPY encoding_data TO '{TEST_DIR}/invalid_encoding_spec.parquet' (
     FORMAT PARQUET,
     ENCODING 'PLAIN'

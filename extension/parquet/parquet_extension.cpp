@@ -125,7 +125,7 @@ struct ParquetWriteBindData : public TableFunctionData {
 	//! Which encodings to include when writing
 	ParquetVersion parquet_version = ParquetVersion::V1;
 	//! Requested encoding for each top-level column
-	vector<ParquetColumnEncoding> column_encodings;
+	vector<optional<duckdb_parquet::Encoding::type>> column_encodings;
 
 	//! Which geo-parquet version to use when writing
 	GeoParquetVersion geoparquet_version = GeoParquetVersion::V1;
@@ -137,57 +137,41 @@ struct ParquetWriteBindData : public TableFunctionData {
 	TimeStampIsAdjustedToUTC timestamp_is_adjusted_to_utc = TimeStampIsAdjustedToUTC::AUTO;
 };
 
-static const char *ParquetColumnEncodingToString(ParquetColumnEncoding encoding) {
-	switch (encoding) {
-	case ParquetColumnEncoding::AUTO:
-		return "AUTO";
-	case ParquetColumnEncoding::PLAIN:
-		return "PLAIN";
-	case ParquetColumnEncoding::RLE_DICTIONARY:
-		return "RLE_DICTIONARY";
-	case ParquetColumnEncoding::DELTA_BINARY_PACKED:
-		return "DELTA_BINARY_PACKED";
-	case ParquetColumnEncoding::DELTA_LENGTH_BYTE_ARRAY:
-		return "DELTA_LENGTH_BYTE_ARRAY";
-	case ParquetColumnEncoding::BYTE_STREAM_SPLIT:
-		return "BYTE_STREAM_SPLIT";
-	default:
-		throw InternalException("Unknown Parquet column encoding");
+static const char *ParquetEncodingToString(duckdb_parquet::Encoding::type encoding) {
+	const auto entry = duckdb_parquet::_Encoding_VALUES_TO_NAMES.find(encoding);
+	if (entry == duckdb_parquet::_Encoding_VALUES_TO_NAMES.end()) {
+		throw InternalException("Unknown Parquet encoding value %d", encoding);
 	}
+	return entry->second;
 }
 
-static ParquetColumnEncoding ParseParquetColumnEncoding(const Value &value) {
+static optional<duckdb_parquet::Encoding::type> TryParseParquetEncoding(const string &name) {
+	for (const auto &entry : duckdb_parquet::_Encoding_VALUES_TO_NAMES) {
+		if (StringUtil::CIEquals(entry.second, name)) {
+			return static_cast<duckdb_parquet::Encoding::type>(entry.first);
+		}
+	}
+	return nullopt;
+}
+
+static duckdb_parquet::Encoding::type ParseParquetColumnEncoding(const Value &value) {
 	if (value.IsNull() || value.type().id() != LogicalTypeId::VARCHAR) {
 		throw BinderException("ENCODING values must be non-NULL strings");
 	}
-	const auto encoding = StringUtil::Upper(value.ToString());
-	if (encoding == "PLAIN") {
-		return ParquetColumnEncoding::PLAIN;
+	const auto name = value.ToString();
+	const auto encoding = TryParseParquetEncoding(name);
+	if (!encoding) {
+		throw BinderException("Unknown Parquet encoding \"%s\"", name);
 	}
-	if (encoding == "RLE_DICTIONARY") {
-		return ParquetColumnEncoding::RLE_DICTIONARY;
-	}
-	if (encoding == "DELTA_BINARY_PACKED") {
-		return ParquetColumnEncoding::DELTA_BINARY_PACKED;
-	}
-	if (encoding == "DELTA_LENGTH_BYTE_ARRAY") {
-		return ParquetColumnEncoding::DELTA_LENGTH_BYTE_ARRAY;
-	}
-	if (encoding == "BYTE_STREAM_SPLIT") {
-		return ParquetColumnEncoding::BYTE_STREAM_SPLIT;
-	}
-	throw BinderException(
-	    "Unsupported Parquet encoding \"%s\". Expected one of [PLAIN, RLE_DICTIONARY, DELTA_BINARY_PACKED, "
-	    "DELTA_LENGTH_BYTE_ARRAY, BYTE_STREAM_SPLIT]",
-	    encoding);
+	return *encoding;
 }
 
 static void ParseParquetColumnEncodings(const Value &value, const vector<Identifier> &names,
-                                        vector<ParquetColumnEncoding> &result) {
+                                        vector<optional<duckdb_parquet::Encoding::type>> &result) {
 	if (value.type().id() != LogicalTypeId::STRUCT) {
 		throw BinderException("Expected ENCODING argument to be a STRUCT of column names to encodings");
 	}
-	result.assign(names.size(), ParquetColumnEncoding::AUTO);
+	result.assign(names.size(), nullopt);
 	const auto &children = StructValue::GetChildren(value);
 	for (idx_t child_idx = 0; child_idx < children.size(); child_idx++) {
 		const auto &column_name = StructType::GetChildName(value.type(), child_idx);
@@ -212,39 +196,39 @@ static void ParseParquetColumnEncodings(const Value &value, const vector<Identif
 }
 
 static bool ParquetTypeSupportsEncoding(const LogicalType &type, duckdb_parquet::Type::type parquet_type,
-                                        ParquetColumnEncoding encoding) {
-	if (encoding == ParquetColumnEncoding::PLAIN) {
+                                        duckdb_parquet::Encoding::type encoding) {
+	if (encoding == duckdb_parquet::Encoding::PLAIN) {
 		return type.id() != LogicalTypeId::ENUM;
 	}
-	if (encoding == ParquetColumnEncoding::RLE_DICTIONARY) {
+	if (encoding == duckdb_parquet::Encoding::RLE_DICTIONARY) {
 		return type.id() != LogicalTypeId::BOOLEAN && type.id() != LogicalTypeId::SQLNULL &&
 		       (type.id() != LogicalTypeId::DECIMAL || type.InternalType() != PhysicalType::INT128);
 	}
-	if (encoding == ParquetColumnEncoding::DELTA_BINARY_PACKED) {
+	if (encoding == duckdb_parquet::Encoding::DELTA_BINARY_PACKED) {
 		return parquet_type == duckdb_parquet::Type::INT32 || parquet_type == duckdb_parquet::Type::INT64;
 	}
-	if (encoding == ParquetColumnEncoding::DELTA_LENGTH_BYTE_ARRAY) {
+	if (encoding == duckdb_parquet::Encoding::DELTA_LENGTH_BYTE_ARRAY) {
 		return parquet_type == duckdb_parquet::Type::BYTE_ARRAY && type.id() != LogicalTypeId::ENUM;
 	}
-	if (encoding == ParquetColumnEncoding::BYTE_STREAM_SPLIT) {
+	if (encoding == duckdb_parquet::Encoding::BYTE_STREAM_SPLIT) {
 		return parquet_type == duckdb_parquet::Type::FLOAT || parquet_type == duckdb_parquet::Type::DOUBLE;
 	}
-	return encoding == ParquetColumnEncoding::AUTO;
+	return false;
 }
 
 static void ValidateParquetColumnEncodings(const vector<Identifier> &names, const vector<LogicalType> &types,
-                                           const vector<ParquetColumnEncoding> &encodings,
+                                           const vector<optional<duckdb_parquet::Encoding::type>> &encodings,
                                            bool write_timestamp_as_int96) {
 	for (idx_t column_idx = 0; column_idx < encodings.size(); column_idx++) {
-		const auto encoding = encodings[column_idx];
-		if (encoding == ParquetColumnEncoding::AUTO) {
+		const auto &encoding = encodings[column_idx];
+		if (!encoding) {
 			continue;
 		}
 		duckdb_parquet::Type::type parquet_type;
 		if (!ParquetWriter::TryGetParquetType(types[column_idx], &parquet_type, write_timestamp_as_int96) ||
-		    !ParquetTypeSupportsEncoding(types[column_idx], parquet_type, encoding)) {
+		    !ParquetTypeSupportsEncoding(types[column_idx], parquet_type, *encoding)) {
 			throw BinderException("Parquet encoding %s is not supported for column \"%s\" with type %s",
-			                      ParquetColumnEncodingToString(encoding), names[column_idx], types[column_idx]);
+			                      ParquetEncodingToString(*encoding), names[column_idx], types[column_idx]);
 		}
 	}
 }
@@ -699,29 +683,15 @@ ParquetVersion EnumUtil::FromString<ParquetVersion>(const char *value) {
 }
 
 template <>
-const char *EnumUtil::ToChars<ParquetColumnEncoding>(ParquetColumnEncoding value) {
-	return ParquetColumnEncodingToString(value);
+const char *EnumUtil::ToChars<duckdb_parquet::Encoding::type>(duckdb_parquet::Encoding::type value) {
+	return ParquetEncodingToString(value);
 }
 
 template <>
-ParquetColumnEncoding EnumUtil::FromString<ParquetColumnEncoding>(const char *value) {
-	if (StringUtil::Equals(value, "AUTO")) {
-		return ParquetColumnEncoding::AUTO;
-	}
-	if (StringUtil::Equals(value, "PLAIN")) {
-		return ParquetColumnEncoding::PLAIN;
-	}
-	if (StringUtil::Equals(value, "RLE_DICTIONARY")) {
-		return ParquetColumnEncoding::RLE_DICTIONARY;
-	}
-	if (StringUtil::Equals(value, "DELTA_BINARY_PACKED")) {
-		return ParquetColumnEncoding::DELTA_BINARY_PACKED;
-	}
-	if (StringUtil::Equals(value, "DELTA_LENGTH_BYTE_ARRAY")) {
-		return ParquetColumnEncoding::DELTA_LENGTH_BYTE_ARRAY;
-	}
-	if (StringUtil::Equals(value, "BYTE_STREAM_SPLIT")) {
-		return ParquetColumnEncoding::BYTE_STREAM_SPLIT;
+duckdb_parquet::Encoding::type EnumUtil::FromString<duckdb_parquet::Encoding::type>(const char *value) {
+	const auto encoding = TryParseParquetEncoding(value);
+	if (encoding) {
+		return *encoding;
 	}
 	throw NotImplementedException(StringUtil::Format("Enum value: '%s' not implemented", value));
 }
@@ -968,8 +938,9 @@ static unique_ptr<FunctionData> ParquetCopyDeserialize(Deserializer &deserialize
 	    deserializer.ReadPropertyWithExplicitDefault<vector<bool>>(120, "not_null_columns", vector<bool>());
 	data->data_page_size_limit =
 	    deserializer.ReadPropertyWithExplicitDefault(121, "data_page_size_limit", default_value.data_page_size_limit);
-	data->column_encodings = deserializer.ReadPropertyWithExplicitDefault<vector<ParquetColumnEncoding>>(
-	    122, "column_encodings", default_value.column_encodings);
+	data->column_encodings =
+	    deserializer.ReadPropertyWithExplicitDefault<vector<optional<duckdb_parquet::Encoding::type>>>(
+	        122, "column_encodings", default_value.column_encodings);
 
 	return std::move(data);
 }
