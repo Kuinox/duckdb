@@ -1,0 +1,97 @@
+# name: test/sql/copy/parquet/writer/parquet_write_encoding.test
+# description: Select Parquet encodings per column
+# group: [writer]
+
+require parquet
+
+statement ok
+CREATE TABLE encoding_data AS
+SELECT i::INTEGER AS id,
+       ('category_' || (i % 4))::VARCHAR AS category,
+       ('payload_' || i)::VARCHAR AS payload,
+       ('delta_' || i)::VARCHAR AS delta_text,
+       i::DOUBLE AS measure
+FROM range(100) t(i);
+
+statement ok
+COPY encoding_data TO '{TEST_DIR}/encodings.parquet' (
+    FORMAT PARQUET,
+    ENCODING {
+        ID: 'DELTA_BINARY_PACKED',
+        category: 'RLE_DICTIONARY',
+        payload: 'PLAIN',
+        delta_text: 'DELTA_LENGTH_BYTE_ARRAY',
+        measure: 'BYTE_STREAM_SPLIT'
+    }
+);
+
+query TT
+SELECT path_in_schema, encodings
+FROM parquet_metadata('{TEST_DIR}/encodings.parquet')
+ORDER BY column_id;
+----
+id	DELTA_BINARY_PACKED
+category	RLE_DICTIONARY
+payload	PLAIN
+delta_text	DELTA_LENGTH_BYTE_ARRAY
+measure	BYTE_STREAM_SPLIT
+
+query IIITR
+SELECT count(*), sum(id), count(DISTINCT category), min(payload), max(measure)
+FROM '{TEST_DIR}/encodings.parquet';
+----
+100	4950	4	payload_0	99.0
+
+# Explicit dictionary encoding is honored even when the automatic dictionary size limit would be exceeded.
+statement ok
+COPY (SELECT i::VARCHAR AS value FROM range(3000) t(i))
+TO '{TEST_DIR}/forced_dictionary.parquet' (
+    FORMAT PARQUET,
+    ENCODING {value: 'RLE_DICTIONARY'}
+);
+
+query I
+SELECT encodings = 'RLE_DICTIONARY'
+FROM parquet_metadata('{TEST_DIR}/forced_dictionary.parquet');
+----
+true
+
+statement error
+COPY encoding_data TO '{TEST_DIR}/invalid_encoding_value.parquet' (
+    FORMAT PARQUET,
+    ENCODING {id: 'NOT_AN_ENCODING'}
+);
+----
+Binder Error
+
+statement error
+COPY encoding_data TO '{TEST_DIR}/invalid_encoding_column.parquet' (
+    FORMAT PARQUET,
+    ENCODING {missing: 'PLAIN'}
+);
+----
+Binder Error
+
+statement error
+COPY encoding_data TO '{TEST_DIR}/invalid_encoding_type.parquet' (
+    FORMAT PARQUET,
+    ENCODING {payload: 'DELTA_BINARY_PACKED'}
+);
+----
+Binder Error
+
+statement error
+COPY encoding_data TO '{TEST_DIR}/invalid_encoding_spec.parquet' (
+    FORMAT PARQUET,
+    ENCODING 'PLAIN'
+);
+----
+Binder Error
+
+statement error
+COPY (SELECT [1, 2, 3] AS values) TO '{TEST_DIR}/invalid_nested_encoding.parquet' (
+    FORMAT PARQUET,
+    ENCODING {values: 'PLAIN'}
+);
+----
+Binder Error

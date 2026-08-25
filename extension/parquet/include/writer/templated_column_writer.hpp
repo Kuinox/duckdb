@@ -68,13 +68,17 @@ static void TemplatedWritePlain(Vector &col, ColumnWriterStatistics *stats, cons
 template <class SRC, class TGT, class OP>
 class StandardColumnWriterState : public PrimitiveColumnWriterState {
 public:
-	StandardColumnWriterState(ParquetWriter &writer, duckdb_parquet::RowGroup &row_group, idx_t col_idx)
+	StandardColumnWriterState(ParquetWriter &writer, duckdb_parquet::RowGroup &row_group, idx_t col_idx,
+	                          ParquetColumnEncoding requested_encoding_p)
 	    : PrimitiveColumnWriterState(writer, row_group, col_idx),
 	      dictionary(BufferAllocator::Get(writer.GetContext()),
-	                 writer.DictionarySizeLimit().IsValid() ? writer.DictionarySizeLimit().GetIndex()
-	                                                        : NumericCast<idx_t>(row_group.num_rows) / 5,
+	                 requested_encoding_p == ParquetColumnEncoding::RLE_DICTIONARY
+	                     ? MinValue<idx_t>(NumericCast<idx_t>(row_group.num_rows),
+	                                       PrimitiveDictionary<SRC, TGT, OP>::MAXIMUM_POSSIBLE_SIZE)
+	                 : writer.DictionarySizeLimit().IsValid() ? writer.DictionarySizeLimit().GetIndex()
+	                                                          : NumericCast<idx_t>(row_group.num_rows) / 5,
 	                 writer.StringDictionaryPageSizeLimit()),
-	      encoding(duckdb_parquet::Encoding::PLAIN) {
+	      requested_encoding(requested_encoding_p), encoding(duckdb_parquet::Encoding::PLAIN) {
 	}
 	~StandardColumnWriterState() override = default;
 
@@ -84,6 +88,7 @@ public:
 	uint32_t key_bit_width = 0;
 
 	PrimitiveDictionary<SRC, TGT, OP> dictionary;
+	ParquetColumnEncoding requested_encoding;
 	duckdb_parquet::Encoding::type encoding;
 };
 
@@ -126,7 +131,8 @@ public:
 
 public:
 	unique_ptr<ColumnWriterState> InitializeWriteState(duckdb_parquet::RowGroup &row_group) override {
-		auto result = make_uniq<StandardColumnWriterState<SRC, TGT, OP>>(writer, row_group, row_group.columns.size());
+		auto result = make_uniq<StandardColumnWriterState<SRC, TGT, OP>>(writer, row_group, row_group.columns.size(),
+		                                                                 writer.GetColumnEncoding(schema_path.front()));
 		result->encoding = writer.GetParquetVersion() == ParquetVersion::V1 ? duckdb_parquet::Encoding::PLAIN_DICTIONARY
 		                                                                    : duckdb_parquet::Encoding::RLE_DICTIONARY;
 		RegisterToRowGroup(row_group);
@@ -236,6 +242,41 @@ public:
 		const auto type = writer.GetType(SchemaIndex());
 
 		auto &state = state_p.Cast<StandardColumnWriterState<SRC, TGT, OP>>();
+		if (state.requested_encoding != ParquetColumnEncoding::AUTO) {
+			switch (state.requested_encoding) {
+			case ParquetColumnEncoding::PLAIN:
+				state.encoding = duckdb_parquet::Encoding::PLAIN;
+				break;
+			case ParquetColumnEncoding::RLE_DICTIONARY:
+				if (state.dictionary.GetSize() == 0) {
+					// There are no non-null values to encode, so no dictionary page can be written.
+					state.encoding = duckdb_parquet::Encoding::PLAIN;
+					state.dictionary.Reset();
+					return;
+				}
+				if (state.dictionary.IsFull()) {
+					throw InvalidInputException(
+					    "Could not use RLE_DICTIONARY encoding for column \"%s\": dictionary size limit exceeded",
+					    column_schema.name);
+				}
+				state.encoding = duckdb_parquet::Encoding::RLE_DICTIONARY;
+				state.key_bit_width = RleBpDecoder::ComputeBitWidthFromValueCount(state.dictionary.GetSize());
+				return;
+			case ParquetColumnEncoding::DELTA_BINARY_PACKED:
+				state.encoding = duckdb_parquet::Encoding::DELTA_BINARY_PACKED;
+				break;
+			case ParquetColumnEncoding::DELTA_LENGTH_BYTE_ARRAY:
+				state.encoding = duckdb_parquet::Encoding::DELTA_LENGTH_BYTE_ARRAY;
+				break;
+			case ParquetColumnEncoding::BYTE_STREAM_SPLIT:
+				state.encoding = duckdb_parquet::Encoding::BYTE_STREAM_SPLIT;
+				break;
+			default:
+				throw InternalException("Unknown requested Parquet column encoding");
+			}
+			state.dictionary.Reset();
+			return;
+		}
 		if (state.dictionary.GetSize() == 0 || state.dictionary.IsFull()) {
 			state.dictionary.Reset();
 			if (writer.GetParquetVersion() == ParquetVersion::V1) {

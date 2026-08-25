@@ -93,6 +93,15 @@ enum class ParquetVersion : uint8_t {
 	V2 = 2, //! Includes the encodings above
 };
 
+enum class ParquetColumnEncoding : uint8_t {
+	AUTO = 0,
+	PLAIN = 1,
+	RLE_DICTIONARY = 2,
+	DELTA_BINARY_PACKED = 3,
+	DELTA_LENGTH_BYTE_ARRAY = 4,
+	BYTE_STREAM_SPLIT = 5,
+};
+
 enum class TimeStampIsAdjustedToUTC : uint8_t {
 	//! true if TZ, false if not
 	AUTO,
@@ -177,6 +186,8 @@ struct ParquetWriterOptions {
 	int64_t compression_level;
 	//! Parquet version to use, higher versions enable more advanced compression modes
 	ParquetVersion parquet_version;
+	//! Requested encoding for each top-level column, or AUTO to use the writer's default selection
+	vector<ParquetColumnEncoding> column_encodings;
 	//! GEO Parquet version to use
 	GeoParquetVersion geoparquet_version;
 	//! Whether timestamp columns should be written as the INT96 type in the parquet file
@@ -251,6 +262,7 @@ public:
 	ParquetVersion GetParquetVersion() const {
 		return options.parquet_version;
 	}
+	ParquetColumnEncoding GetColumnEncoding(const Identifier &column_name) const;
 	GeoParquetVersion GetGeoParquetVersion() const {
 		return options.geoparquet_version;
 	}
