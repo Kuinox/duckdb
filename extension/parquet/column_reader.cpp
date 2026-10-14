@@ -286,7 +286,8 @@ bool ColumnReader::PageIsFilteredOut(PageHeader &page_hdr, optional_ptr<const Ta
 	    dictionary_decoder.HasFilteredOutAllValues()) {
 		encoding = ColumnEncoding::DICTIONARY;
 		page_is_filtered_out = true;
-	} else if (filter) {
+	} else if (filter && !reader.parquet_options.encryption_config) {
+		// Encrypted payloads have framing bytes beyond compressed_page_size.
 		optional_ptr<const duckdb_parquet::Statistics> page_stats;
 		if (is_v1 && v1_header.__isset.statistics) {
 			page_stats = &v1_header.statistics;
@@ -903,7 +904,8 @@ void ColumnReader::Filter(ColumnReaderInput &input, Vector &result, const TableF
                           TableFilterState &filter_state, SelectionVector &sel, idx_t &approved_tuple_count,
                           bool is_first_filter) {
 	auto &num_values = input.num_values;
-	if (SupportsDirectFilter() && !HasRepeats() && !(IsRoot() && AllValuesAreNull())) {
+	if (SupportsDirectFilter() && !HasRepeats() && !(IsRoot() && AllValuesAreNull()) &&
+	    (is_first_filter || !reader.parquet_options.encryption_config)) {
 		DirectFilter(input, result, filter, filter_state, sel, approved_tuple_count, is_first_filter);
 		return;
 	}
