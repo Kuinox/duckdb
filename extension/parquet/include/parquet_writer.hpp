@@ -17,6 +17,7 @@
 
 #include "duckdb.hpp"
 #include "duckdb/common/common.hpp"
+#include "duckdb/common/optional.hpp"
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/encryption_state.hpp"
 #include "duckdb/common/exception.hpp"
@@ -179,6 +180,8 @@ struct ParquetWriterOptions {
 	int64_t compression_level;
 	//! Parquet version to use, higher versions enable more advanced compression modes
 	ParquetVersion parquet_version;
+	//! Requested encoding for each top-level column, or nullopt to use the writer's default selection
+	vector<optional<duckdb_parquet::Encoding::type>> column_encodings;
 	//! GEO Parquet version to use
 	GeoParquetVersion geoparquet_version;
 	//! Whether timestamp columns should be written as the INT96 type in the parquet file
@@ -253,6 +256,7 @@ public:
 	ParquetVersion GetParquetVersion() const {
 		return options.parquet_version;
 	}
+	optional<duckdb_parquet::Encoding::type> GetColumnEncoding(const Identifier &column_name) const;
 	GeoParquetVersion GetGeoParquetVersion() const {
 		return options.geoparquet_version;
 	}
