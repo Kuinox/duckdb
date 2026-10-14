@@ -273,8 +273,8 @@ void ColumnReader::InitializeRead(idx_t row_group_idx_p, idx_t row_group_num_row
 }
 
 bool ColumnReader::PageIsFilteredOut(PageHeader &page_hdr, optional_ptr<const TableFilter> filter) {
-	if (page_hdr.type != PageType::DATA_PAGE && page_hdr.type != PageType::DATA_PAGE_V2) {
-		// we can only filter out data pages
+	if (HasRepeats() || (page_hdr.type != PageType::DATA_PAGE && page_hdr.type != PageType::DATA_PAGE_V2)) {
+		// Repeated columns need their repetition levels even when no values match.
 		return false;
 	}
 	bool is_v1 = page_hdr.type == PageType::DATA_PAGE;
@@ -282,29 +282,34 @@ bool ColumnReader::PageIsFilteredOut(PageHeader &page_hdr, optional_ptr<const Ta
 	auto &v2_header = page_hdr.data_page_header_v2;
 	auto page_encoding = is_v1 ? v1_header.encoding : v2_header.encoding;
 
-	if (page_encoding == Encoding::PLAIN_DICTIONARY || page_encoding == Encoding::RLE_DICTIONARY) {
-		if (!dictionary_decoder.HasFilteredOutAllValues()) {
-			return false;
-		}
+	if ((page_encoding == Encoding::PLAIN_DICTIONARY || page_encoding == Encoding::RLE_DICTIONARY) &&
+	    dictionary_decoder.HasFilteredOutAllValues()) {
 		encoding = ColumnEncoding::DICTIONARY;
 		page_is_filtered_out = true;
 	} else if (filter) {
-		// try to use page statistics to skip this page if could.
-		const duckdb_parquet::Statistics *page_stats = nullptr;
+		optional_ptr<const duckdb_parquet::Statistics> page_stats;
 		if (is_v1 && v1_header.__isset.statistics) {
 			page_stats = &v1_header.statistics;
 		} else if (!is_v1 && v2_header.__isset.statistics) {
 			page_stats = &v2_header.statistics;
 		}
 
-		if (!page_stats || !((page_stats->__isset.min_value || page_stats->__isset.min) &&
-		                     (page_stats->__isset.max_value || page_stats->__isset.max))) {
+		if (!page_stats) {
 			return false;
 		}
 		auto stats =
 		    ParquetStatisticsUtils::TransformParquetStatistics(Type(), Schema(), *page_stats, /*can_have_nan=*/true);
 		auto &expr_filter = filter->Cast<ExpressionFilter>();
 		if (stats) {
+			stats->Set(StatsInfo::CAN_HAVE_NULL_AND_VALID_VALUES);
+			auto num_values = is_v1 ? v1_header.num_values : v2_header.num_values;
+			if (page_stats->__isset.null_count && page_stats->null_count >= 0 && page_stats->null_count <= num_values) {
+				if (page_stats->null_count == 0) {
+					stats->Set(StatsInfo::CANNOT_HAVE_NULL_VALUES);
+				} else if (page_stats->null_count == num_values) {
+					stats->Set(StatsInfo::CANNOT_HAVE_VALID_VALUES);
+				}
+			}
 			auto prune_result = expr_filter.CheckStatistics(*stats);
 			if (prune_result == FilterPropagateResult::FILTER_ALWAYS_FALSE ||
 			    prune_result == FilterPropagateResult::FILTER_FALSE_OR_NULL) {
@@ -317,7 +322,7 @@ bool ColumnReader::PageIsFilteredOut(PageHeader &page_hdr, optional_ptr<const Ta
 		// skip forward
 		auto &trans = reinterpret_cast<ThriftFileTransport &>(*protocol->getTransport());
 		trans.Skip(page_hdr.compressed_page_size);
-		page_rows_available = is_v1 ? v1_header.num_values : v2_header.num_values;
+		page_rows_available = NumericCast<idx_t>(is_v1 ? v1_header.num_values : v2_header.num_values);
 	}
 
 	return page_is_filtered_out;
@@ -898,8 +903,8 @@ void ColumnReader::Filter(ColumnReaderInput &input, Vector &result, const TableF
                           TableFilterState &filter_state, SelectionVector &sel, idx_t &approved_tuple_count,
                           bool is_first_filter) {
 	auto &num_values = input.num_values;
-	if (SupportsDirectFilter() && is_first_filter && !(IsRoot() && AllValuesAreNull())) {
-		DirectFilter(input, result, filter, filter_state, sel, approved_tuple_count);
+	if (SupportsDirectFilter() && !HasRepeats() && !(IsRoot() && AllValuesAreNull())) {
+		DirectFilter(input, result, filter, filter_state, sel, approved_tuple_count, is_first_filter);
 		return;
 	}
 	Select(input, result, sel, approved_tuple_count);
@@ -907,7 +912,8 @@ void ColumnReader::Filter(ColumnReaderInput &input, Vector &result, const TableF
 }
 
 void ColumnReader::DirectFilter(ColumnReaderInput &input, Vector &result, const TableFilter &filter,
-                                TableFilterState &filter_state, SelectionVector &sel, idx_t &approved_tuple_count) {
+                                TableFilterState &filter_state, SelectionVector &sel, idx_t &approved_tuple_count,
+                                bool is_first_filter) {
 	auto &num_values = input.num_values;
 	auto &define_out = input.define_out;
 	auto &repeat_out = input.repeat_out;
@@ -919,7 +925,8 @@ void ColumnReader::DirectFilter(ColumnReaderInput &input, Vector &result, const 
 	auto read_now = ReadPageHeaders(to_read, &filter, &filter_state);
 
 	// we can only push the filter into the decoder if we are reading the ENTIRE vector in one go
-	if (encoding == ColumnEncoding::DICTIONARY && read_now == to_read && dictionary_decoder.HasFilter()) {
+	if (is_first_filter && encoding == ColumnEncoding::DICTIONARY && read_now == to_read &&
+	    dictionary_decoder.HasFilter()) {
 		if (page_is_filtered_out) {
 			// the page has been filtered out entirely - skip
 			approved_tuple_count = 0;
@@ -934,8 +941,45 @@ void ColumnReader::DirectFilter(ColumnReaderInput &input, Vector &result, const 
 		FinishRead(to_read);
 		return;
 	}
-	// fallback to regular read + filter
-	ReadInternal(input, result);
+	if (!is_first_filter && SupportsDirectSelect() && read_now == to_read && encoding == ColumnEncoding::PLAIN &&
+	    !page_is_filtered_out) {
+		const auto all_valid = PrepareRead(read_now, define_out, repeat_out, 0);
+		const auto define_ptr = all_valid ? nullptr : static_cast<uint8_t *>(define_out);
+		PlainSelect(block, define_ptr, read_now, result, sel, approved_tuple_count);
+		page_rows_available -= read_now;
+		FinishRead(to_read);
+		ApplyFilter(result, filter, filter_state, num_values, sel, approved_tuple_count);
+		return;
+	}
+	// Keep the filter attached when a vector crosses page boundaries.
+	idx_t result_offset = 0;
+	vector<pair<idx_t, idx_t>> pruned_ranges;
+	while (to_read > 0) {
+		read_now = ReadPageHeaders(to_read, &filter, &filter_state);
+		if (page_is_filtered_out) {
+			pruned_ranges.emplace_back(result_offset, result_offset + read_now);
+		}
+		ReadData(read_now, define_out, repeat_out, result, result_offset);
+		result_offset += read_now;
+		to_read -= read_now;
+	}
+	FinishRead(num_values);
+	if (!pruned_ranges.empty()) {
+		SelectionVector remaining_sel(num_values);
+		idx_t remaining_count = 0;
+		idx_t range_idx = 0;
+		for (idx_t i = 0; i < approved_tuple_count; i++) {
+			auto row_idx = sel.get_index(i);
+			while (range_idx < pruned_ranges.size() && row_idx >= pruned_ranges[range_idx].second) {
+				range_idx++;
+			}
+			if (range_idx == pruned_ranges.size() || row_idx < pruned_ranges[range_idx].first) {
+				remaining_sel.set_index(remaining_count++, row_idx);
+			}
+		}
+		sel.Initialize(remaining_sel);
+		approved_tuple_count = remaining_count;
+	}
 	ApplyFilter(result, filter, filter_state, num_values, sel, approved_tuple_count);
 }
 

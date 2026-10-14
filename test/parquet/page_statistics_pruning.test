@@ -1,0 +1,141 @@
+# name: test/parquet/page_statistics_pruning.test
+# description: Prune V1/V2 data pages using statistics, including dictionary pages and NULL predicates
+# group: [parquet]
+
+require parquet
+
+statement ok
+SET threads=1;
+
+foreach prefetch true false
+
+statement ok
+SET disable_parquet_prefetching={prefetch};
+
+foreach file plain_v1 plain_v2 dictionary_v1 dictionary_v2
+
+# One row group, thirteen pages of 333 rows (100 in the last page).
+# The second data page is corrupt, but its statistics exclude it.
+# This also exercises multiple pages within one scan vector.
+query IIII
+SELECT count(*), sum(id), min(id), max(id) FROM '{DATA_DIR}/parquet-testing/page_statistics/{file}.parquet' WHERE x >= 2;
+----
+3430	8165115	666	4095
+
+# A matching page followed by a pruned page in the same vector.
+query IIII
+SELECT count(*), sum(id), min(id), max(id) FROM '{DATA_DIR}/parquet-testing/page_statistics/{file}.parquet' WHERE x = 0;
+----
+333	55278	0	332
+
+query IIII
+SELECT count(*), sum(id), min(id), max(id) FROM '{DATA_DIR}/parquet-testing/page_statistics/{file}.parquet' WHERE x BETWEEN 2 AND 8;
+----
+2331	4268061	666	2996
+
+query IIII
+SELECT count(*), sum(id), min(id), max(id) FROM '{DATA_DIR}/parquet-testing/page_statistics/{file}.parquet' WHERE s >= 'value_02';
+----
+3430	8165115	666	4095
+
+# Rejected pages must be removed from the selection, rather than emitted as matching NULLs.
+query IIII
+SELECT count(*), sum(id), min(id), max(id) FROM '{DATA_DIR}/parquet-testing/page_statistics/{file}.parquet' WHERE n IS NULL;
+----
+100	404550	3996	4095
+
+query IIII
+SELECT count(*), sum(id), min(id), max(id) FROM '{DATA_DIR}/parquet-testing/page_statistics/{file}.parquet' WHERE n = 0 OR n IS NULL;
+----
+433	459828	0	4095
+
+# All-NULL pages have null counts but no min/max. The last m page is corrupt.
+query IIII
+SELECT count(*), sum(id), min(id), max(id) FROM '{DATA_DIR}/parquet-testing/page_statistics/{file}.parquet' WHERE m IS NOT NULL;
+----
+3996	7982010	0	3995
+
+# A second filter must preserve the selection produced by the first.
+query IIII
+SELECT count(*), sum(id), min(id), max(id) FROM '{DATA_DIR}/parquet-testing/page_statistics/{file}.parquet' WHERE x >= 2 AND s >= 'value_02' AND id % 2 = 0;
+----
+1715	4081700	666	4094
+
+# Reading the rejected payload without a filter must fail: the earlier tests prove pruning.
+statement error
+SELECT sum(x) FROM '{DATA_DIR}/parquet-testing/page_statistics/{file}.parquet';
+----
+<REGEX>:.*
+
+statement error
+SELECT sum(hash(s)) FROM '{DATA_DIR}/parquet-testing/page_statistics/{file}.parquet';
+----
+<REGEX>:.*
+
+statement error
+SELECT sum(n) FROM '{DATA_DIR}/parquet-testing/page_statistics/{file}.parquet';
+----
+<REGEX>:.*
+
+statement error
+SELECT sum(m) FROM '{DATA_DIR}/parquet-testing/page_statistics/{file}.parquet';
+----
+<REGEX>:.*
+
+endloop
+
+# Missing page statistics must fall back to reading the payload.
+query IIII
+SELECT count(*), sum(id), min(id), max(id) FROM '{DATA_DIR}/parquet-testing/page_statistics/no_statistics.parquet' WHERE x >= 666;
+----
+2940	6997200	666	4094
+
+query II
+SELECT count(*), sum(id) FROM '{DATA_DIR}/parquet-testing/page_statistics/no_statistics.parquet' WHERE x IS NULL;
+----
+586	1199835
+
+# NaNs compare above finite values in DuckDB and must not be excluded by page maxima.
+query II
+SELECT count(*), sum(id) FROM '{DATA_DIR}/parquet-testing/page_statistics/edge_cases.parquet' WHERE f > 1e100;
+----
+666	443223
+
+query II
+SELECT count(*), sum(id) FROM '{DATA_DIR}/parquet-testing/page_statistics/edge_cases.parquet' WHERE f < -1e100;
+----
+333	387945
+
+query II
+SELECT count(*), sum(id) FROM '{DATA_DIR}/parquet-testing/page_statistics/edge_cases.parquet' WHERE f = 'NaN'::DOUBLE;
+----
+333	166167
+
+query II
+SELECT count(*), sum(id) FROM '{DATA_DIR}/parquet-testing/page_statistics/edge_cases.parquet' WHERE f IS NULL;
+----
+333	498834
+
+# Repeated and composite columns retain their definition/repetition streams.
+query II
+SELECT count(*), sum(id) FROM '{DATA_DIR}/parquet-testing/page_statistics/edge_cases.parquet' WHERE list_contains(l, 5);
+----
+519	863541
+
+query II
+SELECT count(*), sum(id) FROM '{DATA_DIR}/parquet-testing/page_statistics/edge_cases.parquet' WHERE s.v = 5;
+----
+308	563898
+
+# Two dictionary filters on a page larger than a scan vector preserve earlier matches.
+query II
+SELECT count(*), sum(id) FROM '{DATA_DIR}/parquet-testing/page_statistics/large_dictionary_pages.parquet' WHERE x >= 1 AND s = 'value_02';
+----
+768	1574400
+
+query II
+SELECT count(*), sum(id) FROM '{DATA_DIR}/parquet-testing/page_statistics/large_dictionary_pages.parquet' WHERE x >= 1 AND s = 'value_02' AND id % 5 = 0;
+----
+154	315700
+
+endloop

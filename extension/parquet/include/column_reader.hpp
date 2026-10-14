@@ -248,7 +248,8 @@ protected:
 		return false;
 	}
 	void DirectFilter(ColumnReaderInput &input, Vector &result, const TableFilter &filter,
-	                  TableFilterState &filter_state, SelectionVector &sel, idx_t &approved_tuple_count);
+	                  TableFilterState &filter_state, SelectionVector &sel, idx_t &approved_tuple_count,
+	                  bool is_first_filter);
 	void DirectSelect(ColumnReaderInput &input, Vector &result, const SelectionVector &sel, idx_t approved_tuple_count);
 	void ReadEncrypted(duckdb_apache::thrift::TBase &object);
 	void ReadDataEncrypted(const data_ptr_t buffer, const uint32_t buffer_size, PageType::type module);
